@@ -1,18 +1,21 @@
 import os
 import io
+import tempfile
 import streamlit as st
 from PIL import Image
 
 # ===== Replicate SDK =====
 try:
     import replicate
+    from replicate import files as replicate_files  # для files.upload
     REPLICATE_AVAILABLE = True
 except Exception:
     REPLICATE_AVAILABLE = False
+    replicate_files = None  # type: ignore
 
 st.set_page_config(page_title="Try-On (Direct Upload DEBUG)", page_icon="🧪", layout="centered")
 st.title("🧪 Try-On — Direct Upload DEBUG")
-st.caption("Build: DU-DEBUG v4 — прямой аплоад в Replicate + корректный парсинг FileOutput (.url).")
+st.caption("Build: DU-DEBUG v5 — заливаем изображения в Replicate Files → передаём URL. Ключи ровно как у модели.")
 
 # ========== UI ==========
 c1, c2 = st.columns(2)
@@ -38,7 +41,8 @@ model_choice = st.selectbox(
 run = st.button("Try on")
 
 # ========== Helpers ==========
-def _to_jpeg_filelike(uploaded_file, out_name: str, min_side: int = 512, max_side: int = 1024):
+def _to_jpeg_bytes(uploaded_file, min_side: int = 512, max_side: int = 1024) -> bytes:
+    """Любой формат → RGB JPEG. Подтягиваем мелкое до min_side, большое уменьшаем до max_side."""
     img = Image.open(uploaded_file).convert("RGB")
     w, h = img.size
     if w == 0 or h == 0:
@@ -54,11 +58,21 @@ def _to_jpeg_filelike(uploaded_file, out_name: str, min_side: int = 512, max_sid
         img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=90)
-    buf.seek(0)
-    buf.name = out_name
-    return buf
+    return buf.getvalue()
+
+def _upload_to_replicate_files(jpeg_bytes: bytes, name: str = "image.jpg") -> str:
+    """Пишем во временный файл → replicate.files.upload(path) → получаем https URL."""
+    if not REPLICATE_AVAILABLE or not replicate_files:
+        raise RuntimeError("Replicate SDK/files unavailable")
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tf:
+        tf.write(jpeg_bytes)
+        tf.flush()
+        path = tf.name
+    url = replicate_files.upload(path)  # -> 'https://replicate.delivery/...' (прямая ссылка)
+    return url
 
 def _extract_first_image_url(output):
+    """Достаём первый URL из разных форматов ответа (строка, список, dict, FileOutput)."""
     urls = []
     def consider(x):
         if x is None:
@@ -92,11 +106,12 @@ def _extract_first_image_url(output):
         consider(output)
     return urls[0] if urls else None
 
-# ========== Run ==========
+# ====== Run ======
 if run:
+    # базовые проверки
     errors = []
     if person_file is None: errors.append("Upload YOUR photo.")
-    if cloth_file is None:  errors.append("Upload CLOTHING photo.")
+    if cloth_file  is None: errors.append("Upload CLOTHING photo.")
     rep_token = os.getenv("REPLICATE_API_TOKEN") or (st.secrets.get("REPLICATE_API_TOKEN") if hasattr(st, "secrets") else None)
     if not rep_token: errors.append("Missing REPLICATE_API_TOKEN in Streamlit Secrets.")
     if not REPLICATE_AVAILABLE: errors.append("`replicate` package not installed (add to requirements.txt).")
@@ -104,42 +119,50 @@ if run:
         st.error(" | ".join(errors))
     else:
         os.environ["REPLICATE_API_TOKEN"] = rep_token
+
         try:
-            person_input = _to_jpeg_filelike(person_file, "person.jpg")
-            cloth_input  = _to_jpeg_filelike(cloth_file,  "cloth.jpg")
+            # 1) нормализуем → 2) грузим в Replicate Files → 3) получаем URL
+            pj = _to_jpeg_bytes(person_file)
+            cj = _to_jpeg_bytes(cloth_file)
+            person_url = _upload_to_replicate_files(pj, "person.jpg")
+            cloth_url  = _upload_to_replicate_files(cj, "cloth.jpg")
         except Exception as e:
-            st.error(f"Preprocess failed: {e}")
+            st.exception(e)
+            st.error("Preprocess/upload failed.")
             st.stop()
 
+        st.subheader("Debug (prepared URLs)")
+        st.write({"person_url": person_url, "cloth_url": cloth_url, "model": model_choice})
+
+        # зафиксированные версии (при необходимости обнови)
         IDM_VTON = "cuuupid/idm-vton:005205c5e7a4053b04418089f3a22b2b62705f0339ddad0b3f6db0d0e66aabc2"
         ECOM_VTON = "wolverinn/ecommerce-virtual-try-on:39860afc9f164ce9734d5666d17a771f986dd2bd3ad0935d845054f73bbec447"
-
-        def run_idm_vton(person, cloth):
-            try:
-                return replicate.run(IDM_VTON, input={"human_img": person, "garm_img": cloth})
-            except Exception:
-                return replicate.run(IDM_VTON, input={"human_image": person, "cloth_image": cloth})
-
-        def run_ecom_vton(person, cloth):
-            try:
-                return replicate.run(ECOM_VTON, input={"face_image": person, "commerce_image": cloth})
-            except Exception:
-                return replicate.run(ECOM_VTON, input={"image_person": person, "image_clothing": cloth})
 
         try:
             with st.spinner("Generating try-on…"):
                 if model_choice.startswith("idm-vton"):
-                    output = run_idm_vton(person_input, cloth_input)
+                    # ВАЖНО: ровно те ключи, которые просит модель
+                    output = replicate.run(
+                        IDM_VTON,
+                        input={"human_img": person_url, "garm_img": cloth_url}
+                    )
                 else:
-                    output = run_ecom_vton(person_input, cloth_input)
+                    output = replicate.run(
+                        ECOM_VTON,
+                        input={"face_image": person_url, "commerce_image": cloth_url}
+                    )
 
-            st.subheader("Debug (raw output)"); st.write(output)
+            st.subheader("Debug (raw output)")
+            st.write(output)
+
             result_url = _extract_first_image_url(output)
-
             if result_url:
-                st.subheader("Result"); st.image(result_url, use_container_width=True); st.success("Done!")
+                st.subheader("Result")
+                st.image(result_url, use_container_width=True)
+                st.success("Done!")
             else:
-                st.error("No image URL in response (parsed). Try the other model (IDM) or different images.")
+                st.error("No image URL parsed from response. Try the other model or different images.")
+
         except Exception as e:
             st.exception(e)
-            st.error("Try-on failed. Switch model (IDM/Ecommerce) or try different images.")
+            st.error("Try-on failed.")
