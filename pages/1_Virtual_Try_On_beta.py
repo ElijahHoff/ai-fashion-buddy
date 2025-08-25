@@ -79,18 +79,27 @@ if run:
                     input={
                         "human_image": person_url,
                         "cloth_image": cloth_img_url,
-                        # можно добавить: "keep_background": True, "seed": 42
                     },
                 )
             else:
-                # Ecommerce Virtual Try-On
-                output = replicate.run(
-                    "wolverinn/ecommerce-virtual-try-on:39860afc9f164ce9734d5666d17a771f986dd2bd3ad0935d845054f73bbec447",
-                    input={
-                        "image_person": person_url,
-                        "image_clothing": cloth_img_url,
-                    },
-                )
+                # Ecommerce Virtual Try-On (правильные входные поля)
+                try:
+                    output = replicate.run(
+                        "wolverinn/ecommerce-virtual-try-on:39860afc9f164ce9734d5666d17a771f986dd2bd3ad0935d845054f73bbec447",
+                        input={
+                            "face_image": person_url,
+                            "commerce_image": cloth_img_url,
+                        },
+                    )
+                except Exception:
+                    # fallback для старых версий
+                    output = replicate.run(
+                        "wolverinn/ecommerce-virtual-try-on:39860afc9f164ce9734d5666d17a771f986dd2bd3ad0935d845054f73bbec447",
+                        input={
+                            "image_person": person_url,
+                            "image_clothing": cloth_img_url,
+                        },
+                    )
 
         # Replicate возвращает URL(ы) на изображение(я)
         if isinstance(output, list) and output:
