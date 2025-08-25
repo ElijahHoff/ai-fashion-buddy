@@ -12,7 +12,7 @@ except Exception:
 
 st.set_page_config(page_title="Try-On (Direct Upload DEBUG)", page_icon="🧪", layout="centered")
 st.title("🧪 Try-On — Direct Upload DEBUG")
-st.caption("Build: DU-DEBUG v3 — прямой аплоад в Replicate (без внешних хостингов).")
+st.caption("Build: DU-DEBUG v4 — прямой аплоад в Replicate + корректный парсинг FileOutput (.url).")
 
 # ========== UI ==========
 c1, c2 = st.columns(2)
@@ -45,12 +45,10 @@ def _to_jpeg_filelike(uploaded_file, out_name: str, min_side: int = 512, max_sid
     """
     img = Image.open(uploaded_file).convert("RGB")
     w, h = img.size
-    long_side, short_side = max(w, h), min(w, h)
-
     if w == 0 or h == 0:
         raise ValueError("Empty image")
 
-    # апскейл мелкого или даунскейл огромного
+    long_side, short_side = max(w, h), min(w, h)
     if short_side < min_side:
         scale = min_side / short_side
     elif long_side > max_side:
@@ -66,6 +64,57 @@ def _to_jpeg_filelike(uploaded_file, out_name: str, min_side: int = 512, max_sid
     buf.seek(0)
     buf.name = out_name
     return buf
+
+def _extract_first_image_url(output):
+    """
+    Достаём первый пригодный URL из ответа Replicate:
+    - строка-URL
+    - список строк/объектов
+    - dict с ключами images/image/output/result/results/url/urls/...
+    - объекты с атрибутом .url (например, replicate.helpers.FileOutput)
+    """
+    urls = []
+
+    def consider(x):
+        if x is None:
+            return
+        # строка-URL
+        if isinstance(x, str) and x.startswith(("http://", "https://")):
+            urls.append(x)
+            return
+        # объект с атрибутом .url / .href
+        for attr in ("url", "href"):
+            try:
+                val = getattr(x, attr, None)
+                if isinstance(val, str) and val.startswith(("http://", "https://")):
+                    urls.append(val)
+                    return
+            except Exception:
+                pass
+        # иногда str(obj) возвращает сам URL
+        try:
+            s = str(x)
+            if s.startswith(("http://", "https://")):
+                urls.append(s)
+        except Exception:
+            pass
+
+    if isinstance(output, dict):
+        for key in ("images", "image", "output", "result", "results", "urls", "url", "data"):
+            if key in output:
+                v = output[key]
+                if isinstance(v, list):
+                    for it in v:
+                        consider(it)
+                else:
+                    consider(v)
+    elif isinstance(output, list):
+        for it in output:
+            consider(it)
+    else:
+        consider(output)
+
+    return urls[0] if urls else None
 
 # ========== Run ==========
 if run:
@@ -133,31 +182,21 @@ if run:
             else:
                 output = run_ecom_vton(person_input, cloth_input)
 
-        # Replicate часто возвращает список URL или строку URL
-        if isinstance(output, list) and output:
-            result_url = output[0]
-        elif isinstance(output, str):
-            result_url = output
-        else:
-            result_url = None
+        # Покажем сырые данные
+        st.subheader("Debug (raw output)")
+        st.write(output)
 
-        st.subheader("Debug")
-        st.write({
-            "model": model_choice,
-            "token_present": bool(rep_token),
-            "person_input": "file" if hasattr(person_input, "read") else str(type(person_input)),
-            "cloth_input":  "file" if hasattr(cloth_input, "read")  else str(type(cloth_input)),
-            "raw_output": output,
-        })
+        # Универсально достанем первую картинку
+        result_url = _extract_first_image_url(output)
 
         if result_url:
             st.subheader("Result")
             st.image(result_url, use_container_width=True)
             st.success("Done!")
         else:
-            st.error("No image URL in response. Try the other model or different images.")
+            st.error("No image URL in response (parsed). Try the other model or different images.")
 
     except Exception as e:
-        # Покажем полную трассировку, чтобы понять, где именно падает
+        # Полная трассировка для точной диагностики
         st.exception(e)
         st.error("Try-on failed. Switch model (IDM/Ecommerce) or try different images.")
