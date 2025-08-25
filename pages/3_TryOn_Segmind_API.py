@@ -1,41 +1,47 @@
-import os, io, base64, requests, streamlit as st
-from PIL import Image, ImageFilter
+import os
+import io
+import tempfile
+import streamlit as st
+from PIL import Image
 
-st.set_page_config(page_title="Try-On (Segmind API)", page_icon="🧪", layout="centered")
-st.title("🧪 Try-On — Segmind API (HQ)")
-st.caption("Качество: больше входное разрешение, больше шагов, несколько сидов, опциональный апскейл/шарп.")
+# ==== Replicate SDK ====
+try:
+    import replicate
+    from replicate import files as replicate_files
+    REPLICATE_AVAILABLE = True
+except Exception:
+    REPLICATE_AVAILABLE = False
+    replicate_files = None  # type: ignore
 
-# ===== UI =====
+st.set_page_config(page_title="Try-On — IDM-VTON ONLY", page_icon="🧪", layout="centered")
+st.title("🧪 Try-On — IDM-VTON ONLY")
+st.caption("Build: IDMVTON-SINGLE v2 — фиксированная версия + строго human_img/garm_img как URL (Replicate Files).")
+
+# ==== UI ====
 c1, c2 = st.columns(2)
 with c1:
     person_file = st.file_uploader(
-        "Your photo (front-facing, upper body)",
+        "Your photo (front-facing, upper body) — REQUIRED",
         type=["jpg","jpeg","png","webp"],
-        help="Фронтально, по грудь. Лучше ≥768 px по короткой стороне."
+        help="Фронтально, по грудь. Желательно ≥512–768px по короткой стороне."
     )
 with c2:
     cloth_file = st.file_uploader(
-        "Clothing image (product photo)",
+        "Clothing image (product photo) — REQUIRED",
         type=["jpg","jpeg","png","webp"],
-        help="Карточка товара/предмет на ровном фоне."
+        help="Карточка товара на ровном фоне."
     )
 
-category = st.selectbox("Category", ["Upper body","Lower body","Dress"], index=0)
+category = st.selectbox("Category", ["upper_body","lower_body","dresses"], index=0)
+crop = st.checkbox("Auto-crop (если фото не 3:4)", True)
+steps = st.slider("Steps (1–40)", 10, 40, 30)
+seed = st.number_input("Seed (−1 = random)", value=-1, min_value=-1, max_value=2_147_483_647)
 
-with st.expander("Quality settings"):
-    hq = st.checkbox("High quality mode", True)
-    steps = st.slider("num_inference_steps", 20, 60, 50 if hq else 35)
-    guidance = st.slider("guidance_scale", 1.0, 6.0, 3.0 if hq else 2.0)
-    n_variants = st.slider("Render variants (different seeds)", 1, 4, 2 if hq else 1)
-    seed_base = st.number_input("seed start (-1 = random)", value=-1, min_value=-1, max_value=999_999_999)
-    post_upscale = st.checkbox("Post-upscale ×1.5 + sharpen (client-side)", True if hq else False)
+run = st.button("Try on (IDM-VTON)")
 
-run = st.button("Try on (Segmind)")
-
-# ===== helpers =====
-def to_jpeg_bytes(file, min_side=768, max_side=1536, quality=95) -> bytes:
-    """Более крупные входы для лучшей детализации."""
-    img = Image.open(file).convert("RGB")
+# ==== helpers ====
+def to_jpeg_bytes(uploaded_file, min_side=768, max_side=1536, quality=95) -> bytes:
+    img = Image.open(uploaded_file).convert("RGB")
     w, h = img.size
     if w == 0 or h == 0:
         raise ValueError("Empty image")
@@ -52,79 +58,94 @@ def to_jpeg_bytes(file, min_side=768, max_side=1536, quality=95) -> bytes:
     img.save(buf, format="JPEG", quality=quality)
     return buf.getvalue()
 
-def b64(jpeg_bytes: bytes) -> str:
-    return base64.b64encode(jpeg_bytes).decode("utf-8")
+def upload_to_replicate(jpeg_bytes: bytes, suffix=".jpg") -> str:
+    if not REPLICATE_AVAILABLE or not replicate_files:
+        raise RuntimeError("Replicate SDK/files unavailable")
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tf:
+        tf.write(jpeg_bytes)
+        tf.flush()
+        path = tf.name
+    # вернёт https://replicate.delivery/... — можно давать в input как string
+    return replicate_files.upload(path)
 
-def postprocess_upscale(img_bytes: bytes, scale=1.5) -> bytes:
-    """Простой клиентский апскейл + UnsharpMask — без внешних сервисов."""
-    img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-    w, h = img.size
-    img = img.resize((int(w*scale), int(h*scale)), Image.LANCZOS)
-    img = img.filter(ImageFilter.UnsharpMask(radius=1.2, percent=150, threshold=3))
-    out = io.BytesIO()
-    img.save(out, format="JPEG", quality=95)
-    return out.getvalue()
+def extract_first_url(output):
+    if isinstance(output, str) and output.startswith(("http://","https://")):
+        return output
+    if isinstance(output, list) and output:
+        x = output[0]
+        # FileOutput и др. объекты имеют .url
+        for attr in ("url","href"):
+            try:
+                v = getattr(x, attr, None)
+                if isinstance(v, str) and v.startswith(("http://","https://")):
+                    return v
+            except Exception:
+                pass
+        if isinstance(x, str) and x.startswith(("http://","https://")):
+            return x
+    if isinstance(output, dict):
+        for key in ("images","image","output","result","results","urls","url","data"):
+            if key in output:
+                v = output[key]
+                if isinstance(v, list) and v:
+                    return extract_first_url(v)
+                if isinstance(v, str) and v.startswith(("http://","https://")):
+                    return v
+    return None
 
-def call_segmind(person_b64: str, cloth_b64: str, category: str, steps: int, guidance: float, seed: int, base64_out=True):
-    url = "https://api.segmind.com/v1/try-on-diffusion"
-    payload = {
-        "model_image": person_b64,
-        "cloth_image": cloth_b64,
-        "category": category,                 # "Upper body" | "Lower body" | "Dress"
-        "num_inference_steps": int(steps),
-        "guidance_scale": float(guidance),
-        "seed": int(seed),
-        "base64": bool(base64_out)
-    }
-    headers = {"x-api-key": os.getenv("SEGMIND_API_KEY") or (st.secrets.get("SEGMIND_API_KEY") if hasattr(st, "secrets") else "")}
-    r = requests.post(url, json=payload, headers=headers, timeout=180)
-    return r
-
-# ===== run =====
+# ==== run ====
 if run:
     errs = []
     if not person_file: errs.append("Upload YOUR photo.")
     if not cloth_file:  errs.append("Upload CLOTHING photo.")
-    api_key = os.getenv("SEGMIND_API_KEY") or (st.secrets.get("SEGMIND_API_KEY") if hasattr(st, "secrets") else None)
-    if not api_key: errs.append("Add SEGMIND_API_KEY to Secrets.")
+    token = os.getenv("REPLICATE_API_TOKEN") or (st.secrets.get("REPLICATE_API_TOKEN") if hasattr(st, "secrets") else None)
+    if not token: errs.append("Missing REPLICATE_API_TOKEN in Streamlit Secrets.")
+    if not REPLICATE_AVAILABLE: errs.append("`replicate` package not installed (add to requirements.txt).")
     if errs:
         st.error(" | ".join(errs))
-    else:
-        try:
-            person_b64 = b64(to_jpeg_bytes(person_file, min_side=(768 if hq else 512),
-                                           max_side=(1536 if hq else 1024),
-                                           quality=(95 if hq else 90)))
-            cloth_b64  = b64(to_jpeg_bytes(cloth_file,  min_side=(768 if hq else 512),
-                                           max_side=(1536 if hq else 1024),
-                                           quality=(95 if hq else 90)))
-        except Exception as e:
-            st.error(f"Preprocess failed: {e}")
-            st.stop()
+        st.stop()
 
-        cols = st.columns(n_variants)
-        got_any = False
-        for i in range(n_variants):
-            # генерим разные сиды (если -1, даём -1 чтобы API само рандомизировало)
-            seed = -1 if seed_base < 0 else (int(seed_base) + i)
-            with st.spinner(f"Generating variant {i+1}/{n_variants}…"):
-                r = call_segmind(person_b64, cloth_b64, category, steps, guidance, seed, base64_out=True)
+    os.environ["REPLICATE_API_TOKEN"] = token
 
-            if r.status_code == 200:
-                try:
-                    data = r.json()
-                    img_b64 = data.get("image") if isinstance(data, dict) else data
-                    img_bytes = base64.b64decode(img_b64)
-                    if post_upscale:
-                        img_bytes = postprocess_upscale(img_bytes, scale=1.5)
-                    with cols[i]:
-                        st.image(img_bytes, use_container_width=True, caption=f"Variant {i+1} (seed={seed})")
-                    got_any = True
-                except Exception as e:
-                    st.error(f"Parse response failed (variant {i+1}): {e}")
-                    st.code(r.text[:1200])
-            else:
-                st.error(f"API error {r.status_code} (variant {i+1})")
-                st.code(r.text[:1200])
+    # 1) Нормализуем → 2) грузим в Replicate Files → 3) берём HTTPS-URL
+    try:
+        pj = to_jpeg_bytes(person_file)
+        cj = to_jpeg_bytes(cloth_file)
+        human_url = upload_to_replicate(pj, ".jpg")
+        garm_url  = upload_to_replicate(cj, ".jpg")
+    except Exception as e:
+        st.exception(e)
+        st.error("Preprocess/upload failed.")
+        st.stop()
 
-        if not got_any:
-            st.warning("No variants succeeded. Try fewer steps, other seed, or different photos.")
+    st.subheader("Debug (request payload)")
+    payload = {
+        "human_img": human_url,
+        "garm_img": garm_url,
+        "category": category,
+        "crop": bool(crop),
+        "steps": int(steps),
+        "seed": (None if seed < 0 else int(seed)),
+    }
+    st.json(payload)
+
+    # 2) Конкретная рабочая версия IDM-VTON с нужной схемой входов (strings)
+    IDM_VTON = "cuuupid/idm-vton:0513734a452173b8173e907e3a59d19a36266e55b48528559432bd21c7d7e985"  # schema: human_img/garm_img/category/crop/steps/seed
+
+    try:
+        with st.spinner("Generating try-on…"):
+            out = replicate.run(IDM_VTON, input=payload)
+
+        st.subheader("Debug (raw output)")
+        st.write(out)
+
+        url = extract_first_url(out)
+        if url:
+            st.subheader("Result")
+            st.image(url, use_container_width=True)
+            st.success("Done!")
+        else:
+            st.error("No image URL parsed from response.")
+    except Exception as e:
+        st.exception(e)
+        st.error("Model call failed.")
