@@ -28,18 +28,46 @@ model_choice = st.selectbox(
     index=0
 )
 
-def _tmp_host(uploaded_file):
-    """Upload file to a temporary host to obtain a public URL (MVP).
-    В продакшене лучше использовать S3 или Cloudflare R2."""
+def _tmp_host(uploaded_file, filename_fallback: str):
+    """Заливаем картинку на tmpfiles и возвращаем прямой URL.
+    Перед этим конвертируем в нормальный JPEG, чтобы избежать ошибок PIL."""
+    import io
+    from PIL import Image
+
     try:
-        files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
-        r = requests.post("https://tmpfiles.org/api/v1/upload", files=files, timeout=30)
+        # открыть и привести к RGB
+        img = Image.open(uploaded_file).convert("RGB")
+        w, h = img.size
+        # уменьшаем, если очень большое
+        max_side = 512
+        scale = max_side / max(w, h)
+        if scale < 1.0:
+            img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+
+        # сохраняем в буфер
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=90)
+        buf.seek(0)
+
+        # аплоадим подготовленный jpeg
+        files = {"file": (uploaded_file.name or filename_fallback, buf, "image/jpeg")}
+        r = requests.post("https://tmpfiles.org/api/v1/upload", files=files, timeout=60)
         r.raise_for_status()
         data = r.json()
-        return data.get("data", {}).get("url")
+        page_url = data.get("data", {}).get("url")
+        if not page_url:
+            return None
+
+        # переводим в прямую ссылку
+        if "tmpfiles.org" in page_url and "/dl/" not in page_url:
+            parts = page_url.rstrip("/").split("/")
+            file_id = parts[-1]
+            return f"https://tmpfiles.org/dl/{file_id}"
+        return page_url
     except Exception as e:
         st.warning(f"Temporary hosting failed: {e}")
         return None
+
 
 person_url = None
 cloth_img_url = None
