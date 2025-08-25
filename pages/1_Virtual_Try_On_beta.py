@@ -1,11 +1,12 @@
 import os
 import re
 import io
+import time
 import requests
 import streamlit as st
 from PIL import Image
 
-# ===== Replicate SDK (optional, но нужен для try-on) =====
+# ===== Replicate SDK (нужен для вызова моделей) =====
 try:
     import replicate
     REPLICATE_AVAILABLE = True
@@ -14,7 +15,7 @@ except Exception:
 
 st.set_page_config(page_title="Virtual Try-On (beta)", page_icon="🪄", layout="centered")
 st.title("🪄 Virtual Try-On (beta)")
-st.caption("Загрузите фото себя и фото вещи (или URL). Картинки конвертируются локально и не сохраняются на сервере приложения.")
+st.caption("Загрузите фото себя и фото вещи (или прямой URL). Картинки конвертируются локально и не сохраняются на сервере приложения.")
 
 # ===== UI =====
 col1, col2 = st.columns(2)
@@ -28,7 +29,7 @@ with col2:
     cloth_file = st.file_uploader(
         "Clothing image (product photo)",
         type=["jpg", "jpeg", "png", "webp"],
-        help="Карточка товара на ровном фоне"
+        help="Карточка товара/предмет на ровном фоне"
     )
 
 cloth_url = st.text_input("...or paste clothing image URL (optional)")
@@ -40,18 +41,19 @@ model_choice = st.selectbox(
 )
 
 # ===== Helpers =====
-def _is_direct_image_url(url: str) -> bool:
+def _validate_image_url(url: str) -> bool:
+    """HEAD-проверка: это действительно картинка?"""
     try:
         if not url or not url.lower().startswith(("http://", "https://")):
             return False
-        head = requests.head(url, allow_redirects=True, timeout=15)
-        ctype = head.headers.get("Content-Type", "")
-        return head.status_code == 200 and ctype.startswith("image/")
+        resp = requests.head(url, allow_redirects=True, timeout=15)
+        ctype = resp.headers.get("Content-Type", "")
+        return (resp.status_code == 200) and ctype.startswith("image/")
     except Exception:
         return False
 
 def _image_to_jpeg_bytes(img: Image.Image, target_max_side: int = 512) -> bytes:
-    """Конверт в валидный JPEG с ресайзом до разумного размера (не апскейлим агрессивно)."""
+    """Конверт в валидный JPEG с ресайзом до разумного размера."""
     img = img.convert("RGB")
     w, h = img.size
     if max(w, h) > target_max_side:
@@ -62,8 +64,8 @@ def _image_to_jpeg_bytes(img: Image.Image, target_max_side: int = 512) -> bytes:
     buf.seek(0)
     return buf.getvalue()
 
-# ---- Надёжный хостинг изображений: catbox (прямой URL) с фолбеком на tmpfiles ----
-def _host_via_catbox(jpeg_bytes: bytes, filename: str = "image.jpg"):
+# ---- Хостинг изображений: catbox (прямой URL) + tmpfiles (фолбек) с ретраями ----
+def _host_via_catbox(jpeg_bytes: bytes, filename: str = "image.jpg") -> str | None:
     try:
         files = {"fileToUpload": (filename, io.BytesIO(jpeg_bytes), "image/jpeg")}
         data = {"reqtype": "fileupload"}
@@ -71,11 +73,10 @@ def _host_via_catbox(jpeg_bytes: bytes, filename: str = "image.jpg"):
         r.raise_for_status()
         url = r.text.strip()
         return url if url.startswith("http") else None
-    except Exception as e:
-        st.warning(f"Catbox upload failed: {e}")
+    except Exception:
         return None
 
-def _host_via_tmpfiles(jpeg_bytes: bytes, filename: str = "image.jpg"):
+def _host_via_tmpfiles(jpeg_bytes: bytes, filename: str = "image.jpg") -> str | None:
     try:
         up = requests.post(
             "https://tmpfiles.org/api/v1/upload",
@@ -86,19 +87,25 @@ def _host_via_tmpfiles(jpeg_bytes: bytes, filename: str = "image.jpg"):
         page_url = up.json().get("data", {}).get("url")
         if not page_url:
             return None
+        # преобразуем https://tmpfiles.org/<id> -> /dl/<id>
         m = re.fullmatch(r"https?://tmpfiles\.org/([A-Za-z0-9]+)", page_url.rstrip("/"))
         return f"https://tmpfiles.org/dl/{m.group(1)}" if m else page_url
-    except Exception as e:
-        st.warning(f"Tmpfiles upload failed: {e}")
+    except Exception:
         return None
 
-def _host_jpeg_bytes(jpeg_bytes: bytes, filename: str = "image.jpg"):
-    url = _host_via_catbox(jpeg_bytes, filename)
-    if url:
-        return url
-    return _host_via_tmpfiles(jpeg_bytes, filename)
+def _host_jpeg_bytes_with_retry(jpeg_bytes: bytes, filename: str = "image.jpg") -> str | None:
+    """Пытаемся 3 раза через catbox, затем 3 раза через tmpfiles. Проверяем, что URL реально отдает image/*."""
+    for hoster in (_host_via_catbox, _host_via_tmpfiles):
+        delay = 0.8
+        for _ in range(3):
+            url = hoster(jpeg_bytes, filename)
+            if url and _validate_image_url(url):
+                return url
+            time.sleep(delay)
+            delay *= 1.7
+    return None
 
-def _host_uploaded_file(uploaded_file, fallback_name: str):
+def _host_uploaded_file(uploaded_file, fallback_name: str) -> str | None:
     """Открываем любой формат (jpg/png/webp), приводим к JPEG, хостим и возвращаем прямой URL."""
     try:
         img = Image.open(uploaded_file)
@@ -106,16 +113,16 @@ def _host_uploaded_file(uploaded_file, fallback_name: str):
         st.error(f"Cannot open image `{getattr(uploaded_file,'name',fallback_name)}`: {e}")
         return None
     jpeg = _image_to_jpeg_bytes(img)
-    return _host_jpeg_bytes(jpeg, fallback_name)
+    return _host_jpeg_bytes_with_retry(jpeg, fallback_name)
 
-def _download_and_rehost(url: str, fallback_name: str):
-    """Скачиваем любую ссылку, если это картинка — конвертируем в JPEG и пере-хостим."""
+def _download_and_rehost(url: str, fallback_name: str) -> str | None:
+    """Скачиваем любую ссылку. Если это картинка — конвертируем в JPEG и пере-хостим на catbox/tmpfiles."""
     try:
         r = requests.get(url, stream=True, timeout=30)
         r.raise_for_status()
         img = Image.open(io.BytesIO(r.content))
         jpeg = _image_to_jpeg_bytes(img)
-        return _host_jpeg_bytes(jpeg, fallback_name)
+        return _host_jpeg_bytes_with_retry(jpeg, fallback_name)
     except Exception as e:
         st.warning(f"Could not fetch & rehost image: {e}")
         return None
@@ -124,21 +131,29 @@ def _download_and_rehost(url: str, fallback_name: str):
 person_url = None
 cloth_img_url = None
 
+# 1) Фото человека — из upload (обязательно), хостим с ретраями
 if person_file is not None:
     person_url = _host_uploaded_file(person_file, "person.jpg")
 
-if cloth_file is not None:
+# 2) Одежда — если дали прямой URL (например, Amazon .jpg), используем его;
+#    иначе берем upload и хостим
+if cloth_url and _validate_image_url(cloth_url.strip()):
+    cloth_img_url = cloth_url.strip()
+elif cloth_file is not None:
     cloth_img_url = _host_uploaded_file(cloth_file, "cloth.jpg")
-
-if not cloth_img_url and cloth_url:
-    raw = cloth_url.strip()
-    if _is_direct_image_url(raw):
-        cloth_img_url = raw
-    else:
-        cloth_img_url = _download_and_rehost(raw, "cloth.jpg")
 
 with st.expander("Input debug"):
     st.write({"person_url": person_url, "cloth_url": cloth_img_url})
+
+# Жёсткая проверка перед запуском — чтобы не ловить 422 от Replicate
+invalid = []
+if not person_url or not _validate_image_url(person_url):
+    invalid.append("Your photo URL is invalid or not an image.")
+if not cloth_img_url or not _validate_image_url(cloth_img_url):
+    invalid.append("Clothing image URL is invalid or not an image.")
+if invalid:
+    st.error(" | ".join(invalid))
+    st.stop()
 
 run = st.button("Try on")
 
@@ -159,8 +174,7 @@ if not REPLICATE_AVAILABLE:
 
 os.environ["REPLICATE_API_TOKEN"] = rep_token
 
-# ===== Replicate call (поддержка обоих моделей и вариантов имён полей) =====
-# Закреплённые версии; при необходимости обнови на актуальные с страницы модели
+# ===== Replicate endpoints (прикрепленные версии) =====
 IDM_VTON = "cuuupid/idm-vton:005205c5e7a4053b04418089f3a22b2b62705f0339ddad0b3f6db0d0e66aabc2"
 ECOM_VTON = "wolverinn/ecommerce-virtual-try-on:39860afc9f164ce9734d5666d17a771f986dd2bd3ad0935d845054f73bbec447"
 
@@ -180,10 +194,6 @@ def run_ecom_vton(person, cloth):
 
 # ===== Run =====
 if run:
-    if not (person_url and cloth_img_url):
-        st.error("Please provide both your photo and a clothing image (or URL).")
-        st.stop()
-
     try:
         with st.spinner("Generating try-on…"):
             if model_choice.startswith("idm-vton"):
