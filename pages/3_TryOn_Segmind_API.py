@@ -1,47 +1,37 @@
-import os
-import io
-import tempfile
-import streamlit as st
+import os, io, base64, requests, streamlit as st
 from PIL import Image
 
-# ==== Replicate SDK ====
-try:
-    import replicate
-    from replicate import files as replicate_files
-    REPLICATE_AVAILABLE = True
-except Exception:
-    REPLICATE_AVAILABLE = False
-    replicate_files = None  # type: ignore
+st.set_page_config(page_title="Try-On (Segmind API)", page_icon="🧪", layout="centered")
+st.title("🧪 Try-On — Segmind API")
+st.caption("Рабочий путь: шлём фото человека и одежды в Segmind Try-On Diffusion API и получаем результат.")
 
-st.set_page_config(page_title="Try-On — IDM-VTON ONLY", page_icon="🧪", layout="centered")
-st.title("🧪 Try-On — IDM-VTON ONLY")
-st.caption("Build: IDMVTON-SINGLE v2 — фиксированная версия + строго human_img/garm_img как URL (Replicate Files).")
-
-# ==== UI ====
+# ===== UI =====
 c1, c2 = st.columns(2)
 with c1:
     person_file = st.file_uploader(
         "Your photo (front-facing, upper body) — REQUIRED",
         type=["jpg","jpeg","png","webp"],
-        help="Фронтально, по грудь. Желательно ≥512–768px по короткой стороне."
+        help="Фронтально, по грудь. Желательно ≥512px."
     )
 with c2:
     cloth_file = st.file_uploader(
         "Clothing image (product photo) — REQUIRED",
         type=["jpg","jpeg","png","webp"],
-        help="Карточка товара на ровном фоне."
+        help="Карточка товара/предмет на ровном фоне."
     )
 
-category = st.selectbox("Category", ["upper_body","lower_body","dresses"], index=0)
-crop = st.checkbox("Auto-crop (если фото не 3:4)", True)
-steps = st.slider("Steps (1–40)", 10, 40, 30)
-seed = st.number_input("Seed (−1 = random)", value=-1, min_value=-1, max_value=2_147_483_647)
+category = st.selectbox("Category", ["Upper body","Lower body","Dress"], index=0)
 
-run = st.button("Try on (IDM-VTON)")
+with st.expander("Advanced"):
+    steps = st.slider("num_inference_steps", 20, 60, 35)
+    guidance = st.slider("guidance_scale", 1.0, 10.0, 2.0)
+    seed = st.number_input("seed (-1=random)", value=-1, min_value=-1, max_value=999_999_999)
 
-# ==== helpers ====
-def to_jpeg_bytes(uploaded_file, min_side=768, max_side=1536, quality=95) -> bytes:
-    img = Image.open(uploaded_file).convert("RGB")
+run = st.button("Try on")
+
+# ===== helpers =====
+def to_jpeg_bytes(file, min_side=512, max_side=1024) -> bytes:
+    img = Image.open(file).convert("RGB")
     w, h = img.size
     if w == 0 or h == 0:
         raise ValueError("Empty image")
@@ -55,97 +45,63 @@ def to_jpeg_bytes(uploaded_file, min_side=768, max_side=1536, quality=95) -> byt
     if scale != 1.0:
         img = img.resize((int(w*scale), int(h*scale)), Image.LANCZOS)
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=quality)
+    img.save(buf, format="JPEG", quality=90)
     return buf.getvalue()
 
-def upload_to_replicate(jpeg_bytes: bytes, suffix=".jpg") -> str:
-    if not REPLICATE_AVAILABLE or not replicate_files:
-        raise RuntimeError("Replicate SDK/files unavailable")
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tf:
-        tf.write(jpeg_bytes)
-        tf.flush()
-        path = tf.name
-    # вернёт https://replicate.delivery/... — можно давать в input как string
-    return replicate_files.upload(path)
+def b64(jpeg_bytes: bytes) -> str:
+    return base64.b64encode(jpeg_bytes).decode("utf-8")
 
-def extract_first_url(output):
-    if isinstance(output, str) and output.startswith(("http://","https://")):
-        return output
-    if isinstance(output, list) and output:
-        x = output[0]
-        # FileOutput и др. объекты имеют .url
-        for attr in ("url","href"):
-            try:
-                v = getattr(x, attr, None)
-                if isinstance(v, str) and v.startswith(("http://","https://")):
-                    return v
-            except Exception:
-                pass
-        if isinstance(x, str) and x.startswith(("http://","https://")):
-            return x
-    if isinstance(output, dict):
-        for key in ("images","image","output","result","results","urls","url","data"):
-            if key in output:
-                v = output[key]
-                if isinstance(v, list) and v:
-                    return extract_first_url(v)
-                if isinstance(v, str) and v.startswith(("http://","https://")):
-                    return v
-    return None
-
-# ==== run ====
+# ===== run =====
 if run:
-    errs = []
-    if not person_file: errs.append("Upload YOUR photo.")
-    if not cloth_file:  errs.append("Upload CLOTHING photo.")
-    token = os.getenv("REPLICATE_API_TOKEN") or (st.secrets.get("REPLICATE_API_TOKEN") if hasattr(st, "secrets") else None)
-    if not token: errs.append("Missing REPLICATE_API_TOKEN in Streamlit Secrets.")
-    if not REPLICATE_AVAILABLE: errs.append("`replicate` package not installed (add to requirements.txt).")
-    if errs:
-        st.error(" | ".join(errs))
-        st.stop()
+    errors = []
+    if not person_file: errors.append("Upload YOUR photo.")
+    if not cloth_file:  errors.append("Upload CLOTHING photo.")
+    api_key = os.getenv("SEGMIND_API_KEY") or (st.secrets.get("SEGMIND_API_KEY") if hasattr(st, "secrets") else None)
+    if not api_key: errors.append("Add SEGMIND_API_KEY to Secrets.")
+    if errors:
+        st.error(" | ".join(errors))
+    else:
+        try:
+            person_b64 = b64(to_jpeg_bytes(person_file))
+            cloth_b64  = b64(to_jpeg_bytes(cloth_file))
+        except Exception as e:
+            st.error(f"Preprocess failed: {e}")
+            st.stop()
 
-    os.environ["REPLICATE_API_TOKEN"] = token
+        url = "https://api.segmind.com/v1/try-on-diffusion"
+        payload = {
+            "model_image": person_b64,   # фото человека (base64)
+            "cloth_image": cloth_b64,    # фото вещи (base64)
+            "category": category,        # Upper body / Lower body / Dress
+            "num_inference_steps": int(steps),
+            "guidance_scale": float(guidance),
+            "seed": int(seed),
+            "base64": True               # просим отдать base64
+        }
+        headers = {"x-api-key": api_key}
 
-    # 1) Нормализуем → 2) грузим в Replicate Files → 3) берём HTTPS-URL
-    try:
-        pj = to_jpeg_bytes(person_file)
-        cj = to_jpeg_bytes(cloth_file)
-        human_url = upload_to_replicate(pj, ".jpg")
-        garm_url  = upload_to_replicate(cj, ".jpg")
-    except Exception as e:
-        st.exception(e)
-        st.error("Preprocess/upload failed.")
-        st.stop()
+        with st.spinner("Generating try-on via Segmind…"):
+            r = requests.post(url, json=payload, headers=headers, timeout=120)
 
-    st.subheader("Debug (request payload)")
-    payload = {
-        "human_img": human_url,
-        "garm_img": garm_url,
-        "category": category,
-        "crop": bool(crop),
-        "steps": int(steps),
-        "seed": (None if seed < 0 else int(seed)),
-    }
-    st.json(payload)
-
-    # 2) Конкретная рабочая версия IDM-VTON с нужной схемой входов (strings)
-    IDM_VTON = "cuuupid/idm-vton:0513734a452173b8173e907e3a59d19a36266e55b48528559432bd21c7d7e985"  # schema: human_img/garm_img/category/crop/steps/seed
-
-    try:
-        with st.spinner("Generating try-on…"):
-            out = replicate.run(IDM_VTON, input=payload)
-
-        st.subheader("Debug (raw output)")
-        st.write(out)
-
-        url = extract_first_url(out)
-        if url:
-            st.subheader("Result")
-            st.image(url, use_container_width=True)
-            st.success("Done!")
+        if r.status_code == 200:
+            # API возвращает image/jpeg (если base64=False) или base64-строку (если True).
+            # Мы запросили base64=True — распарсим:
+            try:
+                # если пришёл бинарный JPEG
+                if r.headers.get("Content-Type","").startswith("image/"):
+                    st.image(r.content, use_container_width=True)
+                else:
+                    data = r.json()
+                    # иногда API возвращает просто строку; иногда {"image": "<b64>"}
+                    img_b64 = data.get("image") if isinstance(data, dict) else data
+                    img_bytes = base64.b64decode(img_b64)
+                    st.image(img_bytes, use_container_width=True)
+                st.success("Done!")
+            except Exception as e:
+                st.error(f"Parse response failed: {e}")
+                st.text(f"Status {r.status_code} headers {dict(r.headers)}")
+                st.code(r.text[:2000])
         else:
-            st.error("No image URL parsed from response.")
-    except Exception as e:
-        st.exception(e)
-        st.error("Model call failed.")
+            st.error(f"API error {r.status_code}")
+            st.text(f"Headers: {dict(r.headers)}")
+            st.code(r.text[:4000])
