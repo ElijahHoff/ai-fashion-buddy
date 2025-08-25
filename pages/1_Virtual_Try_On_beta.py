@@ -29,8 +29,8 @@ model_choice = st.selectbox(
 )
 
 def _tmp_host(uploaded_file):
-    """Upload file to a temporary host to obtain a public URL (simple MVP).
-    In production, replace with S3/Cloudflare R2."""
+    """Upload file to a temporary host to obtain a public URL (MVP).
+    В продакшене лучше использовать S3 или Cloudflare R2."""
     try:
         files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
         r = requests.post("https://tmpfiles.org/api/v1/upload", files=files, timeout=30)
@@ -73,26 +73,26 @@ if run:
     try:
         with st.spinner("Generating try-on…"):
             if model_choice.startswith("idm-vton"):
-                # https://replicate.com/cuuupid/idm-vton
+                # IDM-VTON (KAIST) — Non-commercial use only
                 output = replicate.run(
-                    "cuuupid/idm-vton:latest",
+                    "cuuupid/idm-vton:005205c5e7a4053b04418089f3a22b2b62705f0339ddad0b3f6db0d0e66aabc2",
                     input={
                         "human_image": person_url,
                         "cloth_image": cloth_img_url,
-                        # Доп. параметры можно добавить по желанию, например keep_background / seed
+                        # можно добавить: "keep_background": True, "seed": 42
                     },
                 )
             else:
-                # https://replicate.com/wolverinn/ecommerce-virtual-try-on
+                # Ecommerce Virtual Try-On
                 output = replicate.run(
-                    "wolverinn/ecommerce-virtual-try-on:latest",
+                    "wolverinn/ecommerce-virtual-try-on:39860afc9f164ce9734d5666d17a771f986dd2bd3ad0935d845054f73bbec447",
                     input={
                         "image_person": person_url,
                         "image_clothing": cloth_img_url,
                     },
                 )
 
-        # Replicate обычно возвращает URL(ы) на изображение(я)
+        # Replicate возвращает URL(ы) на изображение(я)
         if isinstance(output, list) and output:
             result_url = output[0]
         elif isinstance(output, str):
@@ -104,7 +104,11 @@ if run:
             st.subheader("Result")
             st.image(result_url, use_container_width=True)
             with st.expander("Debug info"):
-                st.write({"person_url": person_url, "cloth_url": cloth_img_url, "model": model_choice})
+                st.write({
+                    "person_url": person_url,
+                    "cloth_url": cloth_img_url,
+                    "model": model_choice
+                })
             st.success("Done! Try other photos for comparison.")
         else:
             st.error("No image in response. Try another model or different images.")
