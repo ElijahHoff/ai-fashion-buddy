@@ -28,6 +28,13 @@ model_choice = st.selectbox(
     index=0
 )
 
+def _ensure_direct_download_url(url: str) -> str:
+    if "tmpfiles.org" in url and "/dl/" not in url:
+        parts = url.rstrip("/").split("/")
+        file_id = parts[-1]
+        return f"https://tmpfiles.org/dl/{file_id}"
+    return url
+
 def _tmp_host(uploaded_file, filename_fallback: str):
     """Заливаем картинку на tmpfiles и возвращаем прямой URL.
     Перед этим конвертируем в нормальный JPEG, чтобы избежать ошибок PIL."""
