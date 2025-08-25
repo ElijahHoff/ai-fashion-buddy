@@ -29,6 +29,8 @@ model_choice = st.selectbox(
 )
 
 def _ensure_direct_download_url(url: str) -> str:
+    if not url:
+        return url
     if "tmpfiles.org" in url and "/dl/" not in url:
         parts = url.rstrip("/").split("/")
         file_id = parts[-1]
@@ -47,17 +49,17 @@ def _tmp_host(uploaded_file, filename_fallback: str):
         w, h = img.size
         # уменьшаем, если очень большое
         max_side = 512
-        scale = max_side / max(w, h)
+        scale = max_side / max(w, h) if max(w, h) else 1.0
         if scale < 1.0:
             img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
 
-        # сохраняем в буфер
+        # сохраняем в буфер как валидный JPEG
         buf = io.BytesIO()
         img.save(buf, format="JPEG", quality=90)
         buf.seek(0)
 
         # аплоадим подготовленный jpeg
-        files = {"file": (uploaded_file.name or filename_fallback, buf, "image/jpeg")}
+        files = {"file": (getattr(uploaded_file, "name", filename_fallback) or filename_fallback, buf, "image/jpeg")}
         r = requests.post("https://tmpfiles.org/api/v1/upload", files=files, timeout=60)
         r.raise_for_status()
         data = r.json()
@@ -66,30 +68,36 @@ def _tmp_host(uploaded_file, filename_fallback: str):
             return None
 
         # переводим в прямую ссылку
-        if "tmpfiles.org" in page_url and "/dl/" not in page_url:
-            parts = page_url.rstrip("/").split("/")
-            file_id = parts[-1]
-            return f"https://tmpfiles.org/dl/{file_id}"
-        return page_url
+        return _ensure_direct_download_url(page_url)
     except Exception as e:
         st.warning(f"Temporary hosting failed: {e}")
         return None
 
-
+# --- Build URLs correctly (pass 2nd arg!) ---
 person_url = None
 cloth_img_url = None
 
-if person_file:
-    person_url = _tmp_host(person_file)
-if cloth_file:
-    cloth_img_url = _tmp_host(cloth_file)
+if person_file is not None:
+    person_url = _tmp_host(person_file, "person.jpg")
+if cloth_file is not None:
+    cloth_img_url = _tmp_host(cloth_file, "cloth.jpg")
 if not cloth_img_url and cloth_url:
-    cloth_img_url = cloth_url.strip()
+    cloth_img_url = _ensure_direct_download_url(cloth_url.strip())
+
+# покажем что реально отправляем
+with st.expander("Input debug"):
+    st.write({"person_url": person_url, "cloth_url": cloth_img_url})
 
 run = st.button("Try on")
 
 # --- Guard rails / tokens ---
-rep_token = os.getenv("REPLICATE_API_TOKEN") or st.secrets.get("REPLICATE_API_TOKEN")
+rep_token = os.getenv("REPLICATE_API_TOKEN")
+if not rep_token:
+    try:
+        rep_token = st.secrets["REPLICATE_API_TOKEN"]
+    except Exception:
+        rep_token = None
+
 if not rep_token:
     st.info("Add REPLICATE_API_TOKEN to Streamlit **Secrets** to enable try-on.")
     st.stop()
@@ -117,7 +125,7 @@ if run:
                     },
                 )
             else:
-                # Ecommerce Virtual Try-On (правильные входные поля)
+                # Ecommerce Virtual Try-On (правильные входные поля; с фолбэком)
                 try:
                     output = replicate.run(
                         "wolverinn/ecommerce-virtual-try-on:39860afc9f164ce9734d5666d17a771f986dd2bd3ad0935d845054f73bbec447",
@@ -127,7 +135,6 @@ if run:
                         },
                     )
                 except Exception:
-                    # fallback для старых версий
                     output = replicate.run(
                         "wolverinn/ecommerce-virtual-try-on:39860afc9f164ce9734d5666d17a771f986dd2bd3ad0935d845054f73bbec447",
                         input={
