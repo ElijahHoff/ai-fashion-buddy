@@ -4,7 +4,7 @@ import numpy as np
 import streamlit as st
 from PIL import Image
 
-# ================= OpenAI (optional) =================
+# ---------- OpenAI (optional) ----------
 try:
     from openai import OpenAI
     OPENAI_AVAILABLE = True
@@ -12,7 +12,6 @@ except Exception:
     OPENAI_AVAILABLE = False
 
 def get_env(name: str, default=None):
-    """Safe secrets/env getter that never crashes the app."""
     val = os.getenv(name)
     if val:
         return val
@@ -21,22 +20,18 @@ def get_env(name: str, default=None):
     except Exception:
         return default
 
-# ================= Retailer templates =================
+# ---------- App setup ----------
+st.set_page_config(page_title="AI Fashion Buddy", page_icon="👗", layout="centered")
+st.title("👗 AI Fashion Buddy — your stylist friend")
+
+# ---------- Retailers & heuristics ----------
 RETAILERS = {
     "Zalando": "https://www.zalando.de/catalog/?q={q}",
     "ASOS": "https://www.asos.com/search/?q={q}",
     "H&M": "https://www2.hm.com/en_eur/search-results.html?q={q}",
     "Amazon": "https://www.amazon.de/s?k={q}",
 }
-
-DEFAULT_ITEMS = [
-    ("Top", 0.22),
-    ("Bottom", 0.22),
-    ("Outerwear", 0.18),
-    ("Shoes", 0.24),
-    ("Accessory", 0.14),
-]
-
+DEFAULT_ITEMS = [("Top", 0.22), ("Bottom", 0.22), ("Outerwear", 0.18), ("Shoes", 0.24), ("Accessory", 0.14)]
 STYLE_KEYWORDS = {
     "casual": ["t-shirt", "jeans", "sneakers"],
     "smart casual": ["oxford shirt", "chinos", "loafers"],
@@ -44,76 +39,47 @@ STYLE_KEYWORDS = {
     "evening": ["silk blouse", "dress pants", "heels"],
     "streetwear": ["oversized hoodie", "cargo pants", "chunky sneakers"],
 }
+GENDER_KEYWORDS = {"male": ["men"], "female": ["women"], "unisex": ["unisex"]}
 
-GENDER_KEYWORDS = {
-    "male": ["men"],
-    "female": ["women"],
-    "unisex": ["unisex"],
-}
-
-# ================= Utils =================
+# ---------- Utils ----------
 def extract_palette(img: Image.Image, k: int = 4):
-    """Return k prominent colors (simple k-means on pixels)."""
     img_small = img.convert("RGB").resize((64, 64))
     data = np.asarray(img_small).reshape(-1, 3).astype(np.float32)
-    # init centers
     centers = data[np.random.choice(len(data), k, replace=False)]
     for _ in range(6):
         dists = ((data[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
         labels = dists.argmin(axis=1)
         new_centers = np.array(
-            [
-                data[labels == i].mean(axis=0) if np.any(labels == i) else centers[i]
-                for i in range(k)
-            ]
+            [data[labels == i].mean(axis=0) if np.any(labels == i) else centers[i] for i in range(k)]
         )
         if np.allclose(new_centers, centers):
             break
         centers = new_centers
     return [tuple(map(int, c)) for c in centers.astype(int).tolist()]
 
-def rgb_to_hex(rgb):
-    return "#%02x%02x%02x" % rgb
-
-def budget_split(total: int):
-    return [(name, max(10, int(total * pct))) for name, pct in DEFAULT_ITEMS]
+def rgb_to_hex(rgb): return "#%02x%02x%02x" % rgb
+def budget_split(total: int): return [(n, max(10, int(total * pct))) for n, pct in DEFAULT_ITEMS]
 
 def build_queries(event, vibe, gender, colors, sizes):
-    base_terms = []
-    vibe_norm = (vibe or "").strip().lower()
-    gender_norm = (gender or "").strip().lower()
-
-    if vibe_norm:
-        base_terms += STYLE_KEYWORDS.get(vibe_norm, [vibe_norm])
-    if gender_norm:
-        base_terms += GENDER_KEYWORDS.get(gender_norm, [gender_norm])
-    if colors:
-        base_terms += colors
-    if sizes:
-        base_terms += [sizes]
-    if event:
-        base_terms += [event]
-
-    # dedupe preserve order
-    base_terms = list(dict.fromkeys([t for t in base_terms if t]))
-
+    base = []
+    if (v := (vibe or "").strip().lower()):   base += STYLE_KEYWORDS.get(v, [v])
+    if (g := (gender or "").strip().lower()): base += GENDER_KEYWORDS.get(g, [g])
+    if colors: base += colors
+    if sizes:  base += [sizes]
+    if event:  base += [event]
+    base = list(dict.fromkeys([t for t in base if t]))
     return {
-        "Top": [" ".join(base_terms + ["top"])],
-        "Bottom": [" ".join(base_terms + ["pants"])],
-        "Outerwear": [" ".join(base_terms + ["jacket"])],
-        "Shoes": [" ".join(base_terms + ["shoes"])],
-        "Accessory": [" ".join(base_terms + ["accessory"])],
+        "Top":       [" ".join(base + ["top"])],
+        "Bottom":    [" ".join(base + ["pants"])],
+        "Outerwear": [" ".join(base + ["jacket"])],
+        "Shoes":     [" ".join(base + ["shoes"])],
+        "Accessory": [" ".join(base + ["accessory"])],
     }
 
 def product_links(query: str):
-    links = []
-    for name, tmpl in RETAILERS.items():
-        url = tmpl.format(q=query.replace(" ", "+"))
-        links.append(f"[{name}]({url})")
-    return " | ".join(links)
+    return " | ".join(f"[{name}]({tmpl.format(q=query.replace(' ', '+'))})" for name, tmpl in RETAILERS.items())
 
 def describe_outfit_with_ai(system_prompt: str, user_prompt: str, model: str):
-    """One-shot outfit blurb for the 'Your Outfit Plan' section."""
     if not OPENAI_AVAILABLE:
         return "(Fallback) Outfit suggestion without AI description."
     api_key = get_env("OPENAI_API_KEY")
@@ -123,24 +89,17 @@ def describe_outfit_with_ai(system_prompt: str, user_prompt: str, model: str):
         client = OpenAI(api_key=api_key)
         rsp = client.chat.completions.create(
             model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
+            messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
             temperature=0.8,
         )
         return (rsp.choices[0].message.content or "").strip()
     except Exception as e:
-        # keep it short & user-friendly
         msg = str(e)
         if "insufficient_quota" in msg or "exceeded your current quota" in msg:
             return "(AI limit reached) Showing basic suggestions."
         return f"(AI error) {e}. Proceeding with basic description."
 
-# =============== Streamlit UI ===============
-st.set_page_config(page_title="AI Fashion Buddy", page_icon="👗", layout="centered")
-st.title("👗 AI Fashion Buddy — your stylist friend")
-
+# ---------- Sidebar (preferences) ----------
 with st.sidebar:
     st.header("Preferences")
     event = st.text_input("Event / Occasion", placeholder="wedding, date, interview…")
@@ -152,7 +111,7 @@ with st.sidebar:
     model_name = st.text_input("OpenAI model (optional)", value=get_env("OPENAI_MODEL", "gpt-4o-mini"))
     photo = st.file_uploader("Optional: upload a photo (JPG/PNG/WEBP)", type=["jpg", "jpeg", "png", "webp"])
 
-# ===== Palette from photo (optional) =====
+# ---------- Palette from photo (optional) ----------
 palette_hex = []
 if photo is not None:
     try:
@@ -160,22 +119,21 @@ if photo is not None:
         cols = extract_palette(img, k=4)
         palette_hex = [rgb_to_hex(c) for c in cols]
         st.caption("Detected palette from photo:")
-        st.write(" ".join([f"`{c}`" for c in palette_hex]))
+        st.write(" ".join(f"`{c}`" for c in palette_hex))
         st.image(img, caption="Your photo (not uploaded anywhere)", use_container_width=True)
     except Exception as e:
         st.warning(f"Couldn't process the image: {e}")
 
-# ====== CHAT ======
+# =============== CHAT (single block!) ===============
 st.divider()
 st.subheader("Ask me anything about your outfit…")
 
-# init history once
 if "messages" not in st.session_state:
     st.session_state.messages = [
         {"role": "assistant", "content": "Hey! I’m your stylist friend. Tell me the occasion ✨"}
     ]
 
-# render history so far
+# render history
 for m in st.session_state.messages:
     with st.chat_message(m["role"]):
         st.markdown(m["content"])
@@ -199,8 +157,7 @@ def offline_reply(user_text: str) -> str:
         f"Подскажи размер/рост/цвета и бюджет — соберу конкретные позиции и ссылки."
     )
 
-def ai_chat_reply():
-    """Use OpenAI with full chat history; graceful fallback."""
+def ai_chat_reply() -> str | None:
     if not OPENAI_AVAILABLE:
         return None
     api_key = get_env("OPENAI_API_KEY")
@@ -208,12 +165,9 @@ def ai_chat_reply():
         return None
     try:
         client = OpenAI(api_key=api_key)
-        # system prompt to steer persona
         system = {"role": "system", "content":
-            "You are a warm, witty fashion girlfriend. Keep answers concise but vivid. "
-            "Ask 1 clarifying question if needed. Suggest items and explain why they fit the occasion, proportions, and palette."
-        }
-        # take last 16 exchanges
+                  "You are a warm, witty fashion girlfriend. Keep answers concise but vivid. "
+                  "Ask 1 clarifying question if needed. Suggest items and explain why they fit the occasion, proportions, and palette."}
         msgs = [system] + [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages][-16:]
         resp = client.chat.completions.create(
             model=get_env("OPENAI_MODEL", "gpt-4o-mini"),
@@ -225,7 +179,7 @@ def ai_chat_reply():
     except Exception:
         return None
 
-# receive new user input
+# single chat_input in the whole app:
 user_msg = st.chat_input("Напиши сюда: повод, бюджет, цвета, размер…")
 if user_msg:
     st.session_state.messages.append({"role": "user", "content": user_msg})
@@ -240,10 +194,9 @@ if user_msg:
     with st.chat_message("assistant"):
         st.markdown(reply)
 
-# ===== Outfit Plan (sidebar-driven; uses last user msg as seasoning) =====
+# ---------- Outfit Plan ----------
 colors = [c.strip() for c in (colors_pref.split(",") if colors_pref else []) if c.strip()]
 if palette_hex:
-    # merge & dedupe
     colors = list(dict.fromkeys(colors + palette_hex))
 
 queries = build_queries(event, vibe, gender, colors, sizes)
@@ -253,11 +206,12 @@ system_prompt = (
     "You are a warm, witty fashion girlfriend. "
     "Be concise but vivid. Explain why the pieces fit the occasion, proportions, and palette."
 )
+
+# last user text to season the plan
 last_user_text = ""
 for m in reversed(st.session_state.messages):
     if m["role"] == "user":
-        last_user_text = m["content"]
-        break
+        last_user_text = m["content"]; break
 
 user_prompt = (
     f"Occasion: {event or '—'}\n"
@@ -275,8 +229,7 @@ st.subheader("Your Outfit Plan")
 st.write(description)
 
 st.divider()
-# keep item order consistent with DEFAULT_ITEMS
-for (item_name, price) in splits:
+for item_name, price in splits:
     q = build_queries(event, vibe, gender, colors, sizes)[item_name][0]
     st.markdown(f"### {item_name} — ~{price}€")
     st.markdown("**Search links:** " + product_links(q))
