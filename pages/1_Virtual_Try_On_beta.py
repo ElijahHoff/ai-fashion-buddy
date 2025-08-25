@@ -43,15 +43,25 @@ model_choice = st.selectbox(
 
 # ===== Helpers =====
 def _validate_image_url(url: str) -> bool:
-    """HEAD-проверка: это действительно картинка?"""
+    import io
+    from PIL import Image
     try:
         if not url or not url.lower().startswith(("http://", "https://")):
             return False
-        resp = requests.head(url, allow_redirects=True, timeout=15)
+        # 1) HEAD: быстро и дёшево
+        resp = requests.head(url, allow_redirects=True, timeout=10)
         ctype = resp.headers.get("Content-Type", "")
-        return (resp.status_code == 200) and ctype.startswith("image/")
+        if resp.status_code == 200 and ctype.startswith("image/"):
+            return True
+        # 2) fallback: маленький GET и попытка открыть как изображение
+        r = requests.get(url, stream=True, timeout=15)
+        r.raise_for_status()
+        chunk = r.raw.read(200_000, decode_content=True)  # ~200KB
+        Image.open(io.BytesIO(chunk))
+        return True
     except Exception:
         return False
+
 
 def _image_to_jpeg_bytes(img: Image.Image, target_min_side: int = 512, target_max_side: int = 1024) -> bytes:
     """Конверт в валидный JPEG. Если слишком маленькое изображение — мягко апскейлим до ~512 по короткой стороне;
