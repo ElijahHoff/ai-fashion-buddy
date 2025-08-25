@@ -3,7 +3,7 @@ import io
 import streamlit as st
 from PIL import Image
 
-# Replicate SDK
+# ===== Replicate SDK =====
 try:
     import replicate
     REPLICATE_AVAILABLE = True
@@ -12,8 +12,7 @@ except Exception:
 
 st.set_page_config(page_title="Virtual Try-On (beta)", page_icon="🪄", layout="centered")
 st.title("🪄 Virtual Try-On (beta)")
-st.caption("Загрузите фото себя и фото вещи (или вставьте прямой URL для вещи). "
-           "Файлы передаются в Replicate напрямую, без внешних хостингов.")
+st.caption("Build: TryOn DirectUpload v2 — файлы передаются напрямую в Replicate, без внешних хостингов.")
 
 # ================== UI ==================
 c1, c2 = st.columns(2)
@@ -30,6 +29,8 @@ with c2:
         help="Карточка товара на ровном фоне."
     )
 
+# опционально: можно дать URL для одежды (или для себя, если не хочешь грузить файл)
+person_url_input = st.text_input("...or paste YOUR photo URL (optional)")
 cloth_url = st.text_input("...or paste clothing image URL (optional)")
 
 model_choice = st.selectbox(
@@ -63,28 +64,31 @@ def _filelike_from_uploaded(uploaded_file, out_name: str, min_side: int = 512, m
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=90)
     buf.seek(0)
-    # важный трюк: дать файлу имя — некоторым SDK это помогает определить тип
+    # важно: задать имя — некоторым SDK это помогает определить тип
     buf.name = out_name
     return buf
 
 # ================== Build inputs for Replicate ==================
-person_input = None   # file-like or URL string
-cloth_input  = None   # file-like or URL string
+# Каждый инпут может быть либо file-like объектом (BytesIO), либо строкой-URL.
+person_input = None
+cloth_input  = None
 
-if person_file is not None:
+# Приоритет: если дан прямой URL — используем его; иначе — файл
+if person_url_input.strip():
+    person_input = person_url_input.strip()
+elif person_file is not None:
     try:
         person_input = _filelike_from_uploaded(person_file, "person.jpg")
     except Exception as e:
         st.error(f"Cannot process your photo: {e}")
 
-# Для одежды: если есть файл — используем файл; иначе можно дать прямой URL (например, с Amazon)
-if cloth_file is not None:
+if cloth_url.strip():
+    cloth_input = cloth_url.strip()
+elif cloth_file is not None:
     try:
         cloth_input = _filelike_from_uploaded(cloth_file, "cloth.jpg")
     except Exception as e:
         st.error(f"Cannot process clothing image: {e}")
-elif cloth_url.strip():
-    cloth_input = cloth_url.strip()
 
 with st.expander("Input debug"):
     st.write({
@@ -99,7 +103,7 @@ run = st.button("Try on")
 if run:
     errors = []
     if person_input is None:
-        errors.append("Upload your photo (or processing failed).")
+        errors.append("Upload your photo or paste its direct URL.")
     if cloth_input is None:
         errors.append("Provide clothing image (file upload or direct URL).")
 
@@ -147,7 +151,7 @@ if run:
             else:
                 output = run_ecom_vton(person_input, cloth_input)
 
-        # Replicate обычно отдаёт список URL или один URL-строку
+        # Replicate обычно отдаёт список URL или одну URL-строку
         if isinstance(output, list) and output:
             result_url = output[0]
         elif isinstance(output, str):
