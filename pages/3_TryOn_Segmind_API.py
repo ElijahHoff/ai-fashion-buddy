@@ -1,9 +1,9 @@
 import os, io, json, base64, requests, streamlit as st
 from PIL import Image, ImageFilter
 
-st.set_page_config(page_title="Try-On (SegFit v1.3)", page_icon="🧪", layout="centered")
-st.title("🧪 Try-On — SegFit v1.3")
-st.caption("Segmind SegFit v1.3: model_type, cn_strength, cn_end, image_format/quality, авто-апскейл входов.")
+st.set_page_config(page_title="Try-On (SegFit v1.3)", layout="centered")
+st.title("Try-On — SegFit v1.3")
+st.caption("Segmind SegFit v1.3: model_type, cn_strength, cn_end, image_format/quality, input autoscale.")
 
 c1, c2 = st.columns(2)
 with c1:
@@ -100,4 +100,4 @@ if run:
                 if resp is not None:
                     st.caption(str(dict(resp.headers)))
     if not any_ok:
-        st.warning("No variant succeeded. Try Balanced, меньше cn_strength/quality, другой seed или другие фото.")
+        st.warning("No variant succeeded. Try Balanced, less cn_strength/quality, try another seed or photo.")
