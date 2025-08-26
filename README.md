@@ -88,6 +88,18 @@ flowchart LR
 
 ---
 
+# Example
+Jacket 
+![51b5vY3yhaL _AC_SY879_](https://github.com/user-attachments/assets/254cc238-f815-42ee-8288-409840fa6be2)
+Person
+![3ab9e07f4b74e005185f726eaa6a77f1](https://github.com/user-attachments/assets/64fc2cf0-9bd7-43ef-9890-c3530e5f98dd)
+Dressed up person
+<img width="1460" height="839" alt="image" src="https://github.com/user-attachments/assets/985b1c7f-ceb8-46b8-9e2e-0a243459bfee" />
+
+
+
+
+
 ## Checklist
 - [ ] Retailer APIs (size and stock filters)
 - [ ] Size recommendations
